@@ -2,7 +2,7 @@
 
 Research and development for a modular, deterministic 3D cube system built
 around interconnected rooms, procedural routes, and an independent puzzle
-solver for Unreal Engine 5.8.
+solver for Unreal Engine 5.8 ~ 6.0.
 
 > **Core principle:** the seed must generate a solvable problem, not only a
 > visually interesting level.
