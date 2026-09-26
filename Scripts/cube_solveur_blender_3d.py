@@ -389,6 +389,7 @@ SPLINE_PALETTE = [
 PALETTE = [
     ("Mur", (0.05, 0.05, 0.06, 1.0), 0.0),
     ("Sol", (0.16, 0.16, 0.19, 1.0), 0.0),
+    ("Mortel", (0.80, 0.10, 0.10, 1.0), 0.2),
 ] + [("Voie%d" % i, rgba, 1.5) for i, (_, rgba, _) in enumerate(SPLINE_PALETTE)]
 MAT_INDEX = {name: i for i, (name, _, _) in enumerate(PALETTE)}
 
@@ -511,6 +512,36 @@ def _path_rooms(result):
     return ids, lvl
 
 
+def get_lethal_mask(seed, x, y, z, rho):
+    """Vectorized version of UCubeRebusLibrary::IsLethal"""
+    H = zlib.crc32(str(seed).encode('utf-8')) & 0xFFFFFFFF
+    H_TRAP = zlib.crc32(b"TRAP") & 0xFFFFFFFF
+    A = np.uint32(_hash_combine(H, H_TRAP))
+    
+    x_part = (x.astype(np.uint32) * np.uint32(73856093))
+    y_part = (y.astype(np.uint32) * np.uint32(19349663))
+    z_part = (z.astype(np.uint32) * np.uint32(83492791))
+    B = x_part ^ y_part ^ z_part
+    
+    term = B + np.uint32(0x9E3779B9) + (A << 6) + (A >> 2)
+    H_final = A ^ term
+    
+    limit = int(rho * 10000.0)
+    return (H_final % np.uint32(10000)) < np.uint32(limit)
+
+
+def make_formula_py(seed, path_index, x, y, z, safe_dir_index):
+    """Reference implementation of UCubeRebusLibrary::MakeFormula"""
+    H = zlib.crc32(str(seed).encode('utf-8')) & 0xFFFFFFFF
+    Hs = _hash_combine(H, path_index)
+    A1 = 1 + (Hs % 3)
+    A2 = 1 + ((Hs >> 3) % 3)
+    A3 = 1 + ((Hs >> 6) % 3)
+    base = A1*x + A2*y + A3*z
+    A4 = ((safe_dir_index - base) % 6 + 6) % 6
+    return (A1, A2, A3, A4)
+
+
 def build_grid_mesh(mesh, manifest, result, p):
     """Grille PLEINE : un cube 1x1x1 par salle.
 
@@ -538,8 +569,14 @@ def build_grid_mesh(mesh, manifest, result, p):
     if p.optimize and p.wall_mode != 'NONE':
         rock = _visible_shell(rock, n)
     rock_ids = np.flatnonzero(rock)
-    rock_mats = np.where(manifest.cells[rock_ids] == WALL,
-                         MAT_INDEX["Mur"], MAT_INDEX["Sol"])
+    
+    is_wall = (manifest.cells[rock_ids] == WALL)
+    rock_mats = np.where(is_wall, MAT_INDEX["Mur"], MAT_INDEX["Sol"])
+    
+    if p.rho > 0.0 and len(rock_ids) > 0:
+        rx, ry, rz = decode_coord(rock_ids, n, n)
+        lethal_mask = get_lethal_mask(manifest.seed, rx, ry, rz, p.rho)
+        rock_mats[lethal_mask & ~is_wall] = MAT_INDEX["Mortel"]
 
     # --- Cubes de chemin (si "avec cube") : couleur = segment de spline ------
     if p.show_path_cubes and path_ids.size:
@@ -701,6 +738,8 @@ class CubeSolveurProps(bpy.types.PropertyGroup):
                             description="0 = chemin court et direct ; 1 = chemin long et sinueux qui remplit le cube")
     verticality: FloatProperty(name="Verticalité", default=0.18, min=0.02, max=1.0, precision=2,
                                description="Fréquence des puits reliant les étages en Z (bas = étages nets)")
+    rho: FloatProperty(name="Densité Mortelle", default=0.25, min=0.0, max=1.0, update=_on_display_change,
+                       description="Proportion de fausses routes qui sont des pièges mortels (0 = Facile, >0 = Impossible)")
     wall_mode: EnumProperty(
         name="Roche",
         items=[
@@ -816,6 +855,7 @@ class VIEW3D_PT_cube_solveur(bpy.types.Panel):
         box.prop(p, "n_keys")
         box.prop(p, "path_len", slider=True)
         box.prop(p, "verticality", slider=True)
+        box.prop(p, "rho", slider=True)
 
         box = layout.box()
         box.label(text="Affichage", icon='HIDE_OFF')
