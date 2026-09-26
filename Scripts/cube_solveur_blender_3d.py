@@ -378,19 +378,17 @@ BOX_OBJ = "CS_Cadre"
 # Couleur de la spline / des cubes de chemin selon la dernière clé possédée.
 # Niveau 0 (avant toute clé) = vert ; puis une couleur par clé.
 SPLINE_PALETTE = [
-    ("Spline0", (0.10, 0.85, 0.25, 1.0), 4.0),
-    ("Spline1", (1.00, 0.65, 0.00, 1.0), 4.0),
-    ("Spline2", (0.90, 0.10, 0.85, 1.0), 4.0),
-    ("Spline3", (0.00, 0.80, 1.00, 1.0), 4.0),
+    ("Spline0", (0.00, 0.85, 0.85, 1.0), 3.0),  # Turquoise (Chemin du solveur - SafePath)
+    ("Spline1", (1.00, 0.65, 0.00, 1.0), 3.0),
+    ("Spline2", (0.90, 0.10, 0.85, 1.0), 3.0),
+    ("Spline3", (0.00, 0.80, 1.00, 1.0), 3.0),
 ]
 
-# Roche (Mur = plein, Sol = salle ouverte non empruntée) + Voie0..3 (mêmes
-# teintes que la spline) pour les cubes réellement traversés par le chemin.
 PALETTE = [
     ("Mur", (0.05, 0.05, 0.06, 1.0), 0.0),
     ("Sol", (0.16, 0.16, 0.19, 1.0), 0.0),
-    ("Mortel", (0.80, 0.10, 0.10, 1.0), 0.2),
-    ("Raccourci", (0.10, 0.80, 0.10, 1.0), 0.2),
+    ("Mortel", (0.85, 0.10, 0.10, 1.0), 0.4),      # Rouge vif (Mortel)
+    ("Raccourci", (0.10, 0.85, 0.10, 1.0), 0.6),   # Vert (SafeShortcut reliant le chemin)
 ] + [("Voie%d" % i, rgba, 1.5) for i, (_, rgba, _) in enumerate(SPLINE_PALETTE)]
 MAT_INDEX = {name: i for i, (name, _, _) in enumerate(PALETTE)}
 
@@ -543,6 +541,101 @@ def make_formula_py(seed, path_index, x, y, z, safe_dir_index):
     return (A1, A2, A3, A4)
 
 
+def compute_shortcuts(manifest, result, rho):
+    """
+    Identifie STRICTEMENT les cellules qui forment un véritable raccourci (SafeShortcut).
+    Une cellule ne peut être un raccourci que si elle fait partie d'une composante
+    non-mortelle reliant au moins 2 étapes séparées du chemin du solveur (sans mourir).
+    """
+    if not result.path or rho <= 0.0:
+        return set()
+
+    n = manifest.nx
+    n3 = n * n * n
+    path_room_ids = [s.room_id for s in result.path]
+    path_set = set(path_room_ids)
+
+    first_idx = {}
+    for i, rid in enumerate(path_room_ids):
+        if rid not in first_idx:
+            first_idx[rid] = i
+
+    all_ids = np.arange(n3, dtype=np.int64)
+    ax, ay, az = decode_coord(all_ids, n, n)
+    is_deadly = get_lethal_mask(manifest.seed, ax, ay, az, rho)
+    for rid in path_set:
+        is_deadly[rid] = False
+
+    cand_mask = ~is_deadly
+    for rid in path_set:
+        cand_mask[rid] = False
+
+    cand_ids = set(np.flatnonzero(cand_mask))
+
+    def get_neighbors(rid):
+        x, y, z = decode_coord(rid, n, n)
+        res = []
+        for dx, dy, dz in ((1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)):
+            nx, ny, nz = x + dx, y + dy, z + dz
+            if 0 <= nx < n and 0 <= ny < n and 0 <= nz < n:
+                res.append(encode_coord(nx, ny, nz, n, n))
+        return res
+
+    visited = set()
+    shortcut_cells = set()
+
+    for start_id in cand_ids:
+        if start_id in visited:
+            continue
+
+        comp = []
+        queue = deque([start_id])
+        visited.add(start_id)
+        touch_points = set()
+
+        while queue:
+            curr = queue.popleft()
+            comp.append(curr)
+            for nb in get_neighbors(curr):
+                if nb in path_set:
+                    touch_points.add(nb)
+                elif nb in cand_ids and nb not in visited:
+                    visited.add(nb)
+                    queue.append(nb)
+
+        # La composante doit toucher au moins 2 points séparés du chemin du solveur
+        if len(touch_points) >= 2:
+            sorted_touch = sorted(list(touch_points), key=lambda r: first_idx[r])
+            comp_set = set(comp)
+            for i in range(len(sorted_touch)):
+                for j in range(i + 1, len(sorted_touch)):
+                    u, v = sorted_touch[i], sorted_touch[j]
+                    if first_idx[v] - first_idx[u] >= 2:
+                        # BFS dans comp_set reliant u à v
+                        q_path = deque([u])
+                        q_vis = {u}
+                        parent = {}
+                        found = False
+                        while q_path and not found:
+                            curr = q_path.popleft()
+                            for nb in get_neighbors(curr):
+                                if nb == v:
+                                    parent[nb] = curr
+                                    found = True
+                                    break
+                                if nb in comp_set and nb not in q_vis:
+                                    q_vis.add(nb)
+                                    parent[nb] = curr
+                                    q_path.append(nb)
+                        if found:
+                            curr = parent[v]
+                            while curr != u:
+                                shortcut_cells.add(curr)
+                                curr = parent[curr]
+
+    return shortcut_cells
+
+
 def build_grid_mesh(mesh, manifest, result, p):
     """Grille PLEINE : un cube 1x1x1 par salle.
 
@@ -570,16 +663,23 @@ def build_grid_mesh(mesh, manifest, result, p):
     if p.optimize and p.wall_mode != 'NONE':
         rock = _visible_shell(rock, n)
     rock_ids = np.flatnonzero(rock)
-    
-    is_wall = (manifest.cells[rock_ids] == WALL)
-    rock_mats = np.where(is_wall, MAT_INDEX["Mur"], MAT_INDEX["Sol"])
-    
-    if p.rho > 0.0 and len(rock_ids) > 0:
+
+    # Couleurs de la roche :
+    # - Mortel (Rouge) si piège mortel
+    # - SafeShortcut (Vert) UNIQUEMENT si le cube forme un raccourci reliant le chemin
+    # - Mur (Gris sombre) pour les autres blocs / culs-de-sac
+    rock_mats = np.full(rock_ids.size, MAT_INDEX["Mur"], dtype=np.int64)
+
+    if rock_ids.size > 0:
         rx, ry, rz = decode_coord(rock_ids, n, n)
-        lethal_mask = get_lethal_mask(manifest.seed, rx, ry, rz, p.rho)
-        # Visualisation Blender : on colore même la roche solide
-        rock_mats[lethal_mask] = MAT_INDEX["Mortel"]
-        rock_mats[~lethal_mask] = MAT_INDEX["Raccourci"]
+        if p.rho > 0.0:
+            is_deadly = get_lethal_mask(manifest.seed, rx, ry, rz, p.rho)
+            rock_mats[is_deadly] = MAT_INDEX["Mortel"]
+
+            shortcuts = compute_shortcuts(manifest, result, p.rho)
+            if shortcuts:
+                is_sc = np.isin(rock_ids, list(shortcuts))
+                rock_mats[is_sc] = MAT_INDEX["Raccourci"]
 
     # --- Cubes de chemin (si "avec cube") : couleur = segment de spline ------
     if p.show_path_cubes and path_ids.size:
