@@ -115,7 +115,8 @@ def _carve_path(n, rng, verticality, toward):
     Renvoie (cases_ordonnées, case_entrée, case_sortie, noeuds_intérieurs) ou
     (None, None, None, None) si la cible n'a pas été atteinte (réseau non connexe).
     """
-    lo, hi = 2, n - 2                                   # bornes paires intérieures
+    lo = 2
+    hi = (n - 2) & ~1                                   # bornes paires intérieures (force pair)
     ev = list(range(lo, hi + 1, 2))
     sc = (n // 2) & ~1
     A = (2, sc, sc)                                     # 1er noeud, derrière l'entrée
@@ -158,6 +159,12 @@ def _carve_path(n, rng, verticality, toward):
         if i + 1 < len(interior):
             q = interior[i + 1]
             full.append(((node[0] + q[0]) // 2, (node[1] + q[1]) // 2, (node[2] + q[2]) // 2))
+            
+    # Connecter la sortie même si n est impair
+    cx, cy, cz = interior[-1]
+    while cx < n - 2:
+        cx += 1
+        full.append((cx, cy, cz))
     full.append((n - 1, ey, ez))                        # sortie sur la face opposée
     return full, (0, sc, sc), (n - 1, ey, ez), interior
 
