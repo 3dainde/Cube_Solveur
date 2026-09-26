@@ -692,8 +692,16 @@ def build_grid_mesh(mesh, manifest, result, p):
         show_ids = np.empty(0, np.int64)
         show_mats = np.empty(0, np.int64)
 
-    ids = np.concatenate([rock_ids, show_ids])
-    mats = np.concatenate([rock_mats, show_mats])
+    # --- Raccourcis isolés en mode "Chemin seul" ----------------------------
+    if p.wall_mode == 'NONE' and getattr(p, "show_shortcuts", True) and shortcuts:
+        sc_ids = np.array(list(shortcuts), dtype=np.int64)
+        sc_mats = np.full(sc_ids.size, MAT_INDEX["Raccourci"], dtype=np.int64)
+    else:
+        sc_ids = np.empty(0, np.int64)
+        sc_mats = np.empty(0, np.int64)
+
+    ids = np.concatenate([rock_ids, show_ids, sc_ids])
+    mats = np.concatenate([rock_mats, show_mats, sc_mats])
     if ids.size == 0:
         _write_cubes(mesh, np.empty((0, 3), np.float32), np.empty(0, np.float32), np.empty(0, np.int64))
         return 0
@@ -855,6 +863,9 @@ class CubeSolveurProps(bpy.types.PropertyGroup):
         name="Cubes sur le chemin", default=False, update=_on_display_change,
         description="Décoché : le chemin est creusé (tunnel 1x1x1 par salle). "
                     "Coché : chaque salle du chemin devient un cube coloré selon la spline")
+    show_shortcuts: BoolProperty(
+        name="Raccourcis sûrs (verts)", default=True, update=_on_display_change,
+        description="Affiche les cubes de raccourcis alternatifs sûrs reliant deux étapes du chemin (vert)")
     cut_z: IntProperty(name="Couche Z", default=GRID_SIZE // 2, min=0, max=GRID_SIZE - 1,
                        update=_on_display_change)
     optimize: BoolProperty(
@@ -968,6 +979,7 @@ class VIEW3D_PT_cube_solveur(bpy.types.Panel):
         if p.wall_mode == 'CUT':
             box.prop(p, "cut_z", slider=True)
         box.prop(p, "show_path_cubes")
+        box.prop(p, "show_shortcuts")
         if p.wall_mode != 'NONE':
             box.prop(p, "optimize")
             if not p.optimize:
