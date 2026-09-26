@@ -664,6 +664,8 @@ def build_grid_mesh(mesh, manifest, result, p):
         rock = _visible_shell(rock, n)
     rock_ids = np.flatnonzero(rock)
 
+    shortcuts = compute_shortcuts(manifest, result, p.rho) if (p.rho > 0.0 and getattr(p, "show_shortcuts", True)) else set()
+
     # Couleurs de la roche :
     # - Mortel (Rouge) si piège mortel
     # - SafeShortcut (Vert) UNIQUEMENT si le cube forme un raccourci reliant le chemin
@@ -676,7 +678,6 @@ def build_grid_mesh(mesh, manifest, result, p):
             is_deadly = get_lethal_mask(manifest.seed, rx, ry, rz, p.rho)
             rock_mats[is_deadly] = MAT_INDEX["Mortel"]
 
-            shortcuts = compute_shortcuts(manifest, result, p.rho)
             if shortcuts:
                 is_sc = np.isin(rock_ids, list(shortcuts))
                 rock_mats[is_sc] = MAT_INDEX["Raccourci"]
