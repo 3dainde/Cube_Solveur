@@ -115,7 +115,8 @@ def _carve_path(n, rng, verticality, toward):
     Renvoie (cases_ordonnées, case_entrée, case_sortie, noeuds_intérieurs) ou
     (None, None, None, None) si la cible n'a pas été atteinte (réseau non connexe).
     """
-    lo, hi = 2, n - 2                                   # bornes paires intérieures
+    lo = 2
+    hi = (n - 2) & ~1                                   # bornes paires intérieures (force pair)
     ev = list(range(lo, hi + 1, 2))
     sc = (n // 2) & ~1
     A = (2, sc, sc)                                     # 1er noeud, derrière l'entrée
@@ -158,6 +159,12 @@ def _carve_path(n, rng, verticality, toward):
         if i + 1 < len(interior):
             q = interior[i + 1]
             full.append(((node[0] + q[0]) // 2, (node[1] + q[1]) // 2, (node[2] + q[2]) // 2))
+            
+    # Connecter la sortie même si n est impair
+    cx, cy, cz = interior[-1]
+    while cx < n - 2:
+        cx += 1
+        full.append((cx, cy, cz))
     full.append((n - 1, ey, ez))                        # sortie sur la face opposée
     return full, (0, sc, sc), (n - 1, ey, ez), interior
 
@@ -368,22 +375,20 @@ GRID_OBJ = "CS_Grille"
 PATH_OBJ = "CS_Chemin"
 BOX_OBJ = "CS_Cadre"
 
-PITCH = 1.0        # distance entre centres de cubes
-
 # Couleur de la spline / des cubes de chemin selon la dernière clé possédée.
 # Niveau 0 (avant toute clé) = vert ; puis une couleur par clé.
 SPLINE_PALETTE = [
-    ("Spline0", (0.10, 0.85, 0.25, 1.0), 4.0),
-    ("Spline1", (1.00, 0.65, 0.00, 1.0), 4.0),
-    ("Spline2", (0.90, 0.10, 0.85, 1.0), 4.0),
-    ("Spline3", (0.00, 0.80, 1.00, 1.0), 4.0),
+    ("Spline0", (0.00, 0.85, 0.85, 1.0), 3.0),  # Turquoise (Chemin du solveur - SafePath)
+    ("Spline1", (1.00, 0.65, 0.00, 1.0), 3.0),
+    ("Spline2", (0.90, 0.10, 0.85, 1.0), 3.0),
+    ("Spline3", (0.00, 0.80, 1.00, 1.0), 3.0),
 ]
 
-# Roche (Mur = plein, Sol = salle ouverte non empruntée) + Voie0..3 (mêmes
-# teintes que la spline) pour les cubes réellement traversés par le chemin.
 PALETTE = [
     ("Mur", (0.05, 0.05, 0.06, 1.0), 0.0),
     ("Sol", (0.16, 0.16, 0.19, 1.0), 0.0),
+    ("Mortel", (0.85, 0.10, 0.10, 1.0), 0.4),      # Rouge vif (Mortel)
+    ("Raccourci", (0.10, 0.85, 0.10, 1.0), 0.6),   # Vert (SafeShortcut reliant le chemin)
 ] + [("Voie%d" % i, rgba, 1.5) for i, (_, rgba, _) in enumerate(SPLINE_PALETTE)]
 MAT_INDEX = {name: i for i, (name, _, _) in enumerate(PALETTE)}
 
@@ -435,10 +440,10 @@ def _get_object(name, data_factory, coll):
     return obj
 
 
-def _world_pos(x, y, z, n):
+def _world_pos(x, y, z, n, pitch):
     """Grille centrée en X/Y, posée sur le sol en Z (fonctionne sur tableaux numpy)."""
-    o = (n - 1) * PITCH / 2.0
-    return x * PITCH - o, y * PITCH - o, z * PITCH + 0.5 * PITCH
+    o = (n - 1) * pitch / 2.0
+    return x * pitch - o, y * pitch - o, z * pitch + 0.5 * pitch
 
 
 def _write_cubes(mesh, centers, sizes, mats):
@@ -506,6 +511,131 @@ def _path_rooms(result):
     return ids, lvl
 
 
+def get_lethal_mask(seed, x, y, z, rho):
+    """Vectorized version of UCubeRebusLibrary::IsLethal"""
+    H = zlib.crc32(str(seed).encode('utf-8')) & 0xFFFFFFFF
+    H_TRAP = zlib.crc32(b"TRAP") & 0xFFFFFFFF
+    A = np.uint32(_hash_combine(H, H_TRAP))
+    
+    x_part = (x.astype(np.uint32) * np.uint32(73856093))
+    y_part = (y.astype(np.uint32) * np.uint32(19349663))
+    z_part = (z.astype(np.uint32) * np.uint32(83492791))
+    B = x_part ^ y_part ^ z_part
+    
+    term = B + np.uint32(0x9E3779B9) + (A << 6) + (A >> 2)
+    H_final = A ^ term
+    
+    limit = int(rho * 10000.0)
+    return (H_final % np.uint32(10000)) < np.uint32(limit)
+
+
+def make_formula_py(seed, path_index, x, y, z, safe_dir_index):
+    """Reference implementation of UCubeRebusLibrary::MakeFormula"""
+    H = zlib.crc32(str(seed).encode('utf-8')) & 0xFFFFFFFF
+    Hs = _hash_combine(H, path_index)
+    A1 = 1 + (Hs % 3)
+    A2 = 1 + ((Hs >> 3) % 3)
+    A3 = 1 + ((Hs >> 6) % 3)
+    base = A1*x + A2*y + A3*z
+    A4 = ((safe_dir_index - base) % 6 + 6) % 6
+    return (A1, A2, A3, A4)
+
+
+def compute_shortcuts(manifest, result, rho):
+    """
+    Identifie STRICTEMENT les cellules qui forment un véritable raccourci (SafeShortcut).
+    Une cellule ne peut être un raccourci que si elle fait partie d'une composante
+    non-mortelle reliant au moins 2 étapes séparées du chemin du solveur (sans mourir).
+    """
+    if not result.path or rho <= 0.0:
+        return set()
+
+    n = manifest.nx
+    n3 = n * n * n
+    path_room_ids = [s.room_id for s in result.path]
+    path_set = set(path_room_ids)
+
+    first_idx = {}
+    for i, rid in enumerate(path_room_ids):
+        if rid not in first_idx:
+            first_idx[rid] = i
+
+    all_ids = np.arange(n3, dtype=np.int64)
+    ax, ay, az = decode_coord(all_ids, n, n)
+    is_deadly = get_lethal_mask(manifest.seed, ax, ay, az, rho)
+    for rid in path_set:
+        is_deadly[rid] = False
+
+    cand_mask = ~is_deadly
+    for rid in path_set:
+        cand_mask[rid] = False
+
+    cand_ids = set(np.flatnonzero(cand_mask))
+
+    def get_neighbors(rid):
+        x, y, z = decode_coord(rid, n, n)
+        res = []
+        for dx, dy, dz in ((1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)):
+            nx, ny, nz = x + dx, y + dy, z + dz
+            if 0 <= nx < n and 0 <= ny < n and 0 <= nz < n:
+                res.append(encode_coord(nx, ny, nz, n, n))
+        return res
+
+    visited = set()
+    shortcut_cells = set()
+
+    for start_id in cand_ids:
+        if start_id in visited:
+            continue
+
+        comp = []
+        queue = deque([start_id])
+        visited.add(start_id)
+        touch_points = set()
+
+        while queue:
+            curr = queue.popleft()
+            comp.append(curr)
+            for nb in get_neighbors(curr):
+                if nb in path_set:
+                    touch_points.add(nb)
+                elif nb in cand_ids and nb not in visited:
+                    visited.add(nb)
+                    queue.append(nb)
+
+        # La composante doit toucher au moins 2 points séparés du chemin du solveur
+        if len(touch_points) >= 2:
+            sorted_touch = sorted(list(touch_points), key=lambda r: first_idx[r])
+            comp_set = set(comp)
+            for i in range(len(sorted_touch)):
+                for j in range(i + 1, len(sorted_touch)):
+                    u, v = sorted_touch[i], sorted_touch[j]
+                    if first_idx[v] - first_idx[u] >= 2:
+                        # BFS dans comp_set reliant u à v
+                        q_path = deque([u])
+                        q_vis = {u}
+                        parent = {}
+                        found = False
+                        while q_path and not found:
+                            curr = q_path.popleft()
+                            for nb in get_neighbors(curr):
+                                if nb == v:
+                                    parent[nb] = curr
+                                    found = True
+                                    break
+                                if nb in comp_set and nb not in q_vis:
+                                    q_vis.add(nb)
+                                    parent[nb] = curr
+                                    q_path.append(nb)
+                        if found:
+                            curr = parent[v]
+                            while curr != u:
+                                shortcut_cells.add(curr)
+                                curr = parent[curr]
+
+    return shortcut_cells
+
+
 def build_grid_mesh(mesh, manifest, result, p):
     """Grille PLEINE : un cube 1x1x1 par salle.
 
@@ -533,8 +663,24 @@ def build_grid_mesh(mesh, manifest, result, p):
     if p.optimize and p.wall_mode != 'NONE':
         rock = _visible_shell(rock, n)
     rock_ids = np.flatnonzero(rock)
-    rock_mats = np.where(manifest.cells[rock_ids] == WALL,
-                         MAT_INDEX["Mur"], MAT_INDEX["Sol"])
+
+    shortcuts = compute_shortcuts(manifest, result, p.rho) if (p.rho > 0.0 and getattr(p, "show_shortcuts", True)) else set()
+
+    # Couleurs de la roche :
+    # - Mortel (Rouge) si piège mortel
+    # - SafeShortcut (Vert) UNIQUEMENT si le cube forme un raccourci reliant le chemin
+    # - Mur (Gris sombre) pour les autres blocs / culs-de-sac
+    rock_mats = np.full(rock_ids.size, MAT_INDEX["Mur"], dtype=np.int64)
+
+    if rock_ids.size > 0:
+        rx, ry, rz = decode_coord(rock_ids, n, n)
+        if p.rho > 0.0:
+            is_deadly = get_lethal_mask(manifest.seed, rx, ry, rz, p.rho)
+            rock_mats[is_deadly] = MAT_INDEX["Mortel"]
+
+            if shortcuts:
+                is_sc = np.isin(rock_ids, list(shortcuts))
+                rock_mats[is_sc] = MAT_INDEX["Raccourci"]
 
     # --- Cubes de chemin (si "avec cube") : couleur = segment de spline ------
     if p.show_path_cubes and path_ids.size:
@@ -547,14 +693,22 @@ def build_grid_mesh(mesh, manifest, result, p):
         show_ids = np.empty(0, np.int64)
         show_mats = np.empty(0, np.int64)
 
-    ids = np.concatenate([rock_ids, show_ids])
-    mats = np.concatenate([rock_mats, show_mats])
+    # --- Raccourcis isolés en mode "Chemin seul" ----------------------------
+    if p.wall_mode == 'NONE' and getattr(p, "show_shortcuts", True) and shortcuts:
+        sc_ids = np.array(list(shortcuts), dtype=np.int64)
+        sc_mats = np.full(sc_ids.size, MAT_INDEX["Raccourci"], dtype=np.int64)
+    else:
+        sc_ids = np.empty(0, np.int64)
+        sc_mats = np.empty(0, np.int64)
+
+    ids = np.concatenate([rock_ids, show_ids, sc_ids])
+    mats = np.concatenate([rock_mats, show_mats, sc_mats])
     if ids.size == 0:
         _write_cubes(mesh, np.empty((0, 3), np.float32), np.empty(0, np.float32), np.empty(0, np.int64))
         return 0
 
     x, y, z = decode_coord(ids, manifest.nx, manifest.ny)
-    wx, wy, wz = _world_pos(x, y, z, n)
+    wx, wy, wz = _world_pos(x, y, z, n, p.room_size)
     centers = np.stack([wx, wy, wz], axis=1).astype(np.float32)
     
     if getattr(p, "custom_room", None):
@@ -565,16 +719,16 @@ def build_grid_mesh(mesh, manifest, result, p):
         mesh.update()
     else:
         # Construction procédurale complète des cubes
-        sizes = np.full(ids.size, 0.96 * PITCH, dtype=np.float32)
+        sizes = np.full(ids.size, 0.96 * p.room_size, dtype=np.float32)
         _write_cubes(mesh, centers, sizes, mats)
         
     return int(ids.size)
 
 
-def build_path_curve(curve, manifest, result, smooth):
+def build_path_curve(curve, manifest, result, smooth, pitch):
     curve.splines.clear()
     curve.dimensions = '3D'
-    curve.bevel_depth = 0.15
+    curve.bevel_depth = 0.15 * pitch
     curve.bevel_resolution = 3
     curve.use_fill_caps = True
     curve.materials.clear()
@@ -589,7 +743,7 @@ def build_path_curve(curve, manifest, result, smooth):
     prev_pt = None
     for s in result.path:
         x, y, z = decode_coord(s.room_id, manifest.nx, manifest.ny)
-        pt = _world_pos(x, y, z, n)
+        pt = _world_pos(x, y, z, n, pitch)
         level = s.inventory.bit_length()
         if not segments or segments[-1][0] != level:
             segments.append((level, [prev_pt] if prev_pt else []))
@@ -608,10 +762,10 @@ def build_path_curve(curve, manifest, result, smooth):
             spline.use_endpoint_u = True
 
 
-def build_box(obj_mesh, n):
-    lo = -n * PITCH / 2.0
-    hi = n * PITCH / 2.0
-    v = [(x, y, z) for z in (0.0, n * PITCH) for y in (lo, hi) for x in (lo, hi)]
+def build_box(obj_mesh, n, pitch):
+    lo = -n * pitch / 2.0
+    hi = n * pitch / 2.0
+    v = [(x, y, z) for z in (0.0, n * pitch) for y in (lo, hi) for x in (lo, hi)]
     e = [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)]
     obj_mesh.clear_geometry()
     obj_mesh.from_pydata(v, e, [])
@@ -639,8 +793,8 @@ def refresh_display(context):
     box.hide_select = True
 
     p.stat_walls = build_grid_mesh(grid.data, manifest, result, p)
-    build_path_curve(path.data, manifest, result, p.smooth)
-    build_box(box.data, manifest.nx)
+    build_path_curve(path.data, manifest, result, p.smooth, p.room_size)
+    build_box(box.data, manifest.nx, p.room_size)
 
     # Gestion de l'instanciation de la salle custom
     # // NOTE POUR UE5/C++ : Dans Unreal, cela correspond à l'utilisation de 
@@ -688,12 +842,16 @@ class CubeSolveurProps(bpy.types.PropertyGroup):
     seed: IntProperty(name="Seed", default=1, min=SEED_MIN, max=SEED_MAX)
     size: IntProperty(name="Taille N (N³)", default=GRID_SIZE, min=8, max=GRID_SIZE,
                       description="Côté de la grille. 64 = 262 144 salles")
+    room_size: FloatProperty(name="Taille (m)", default=1.0, min=0.1, max=1000.0, update=_on_display_change,
+                             description="Taille physique d'une salle et espacement entre les instances")
     n_keys: IntProperty(name="Clés / portes", default=2, min=0, max=3,
                         description="Nombre de plans-barrières à porte verrouillée")
     path_len: FloatProperty(name="Longueur", default=0.45, min=0.0, max=1.0, precision=2,
                             description="0 = chemin court et direct ; 1 = chemin long et sinueux qui remplit le cube")
     verticality: FloatProperty(name="Verticalité", default=0.18, min=0.02, max=1.0, precision=2,
                                description="Fréquence des puits reliant les étages en Z (bas = étages nets)")
+    rho: FloatProperty(name="Densité Mortelle", default=0.25, min=0.0, max=1.0, update=_on_display_change,
+                       description="Proportion de fausses routes qui sont des pièges mortels (0 = Facile, >0 = Impossible)")
     wall_mode: EnumProperty(
         name="Roche",
         items=[
@@ -706,6 +864,9 @@ class CubeSolveurProps(bpy.types.PropertyGroup):
         name="Cubes sur le chemin", default=False, update=_on_display_change,
         description="Décoché : le chemin est creusé (tunnel 1x1x1 par salle). "
                     "Coché : chaque salle du chemin devient un cube coloré selon la spline")
+    show_shortcuts: BoolProperty(
+        name="Raccourcis sûrs (verts)", default=True, update=_on_display_change,
+        description="Affiche les cubes de raccourcis alternatifs sûrs reliant deux étapes du chemin (vert)")
     cut_z: IntProperty(name="Couche Z", default=GRID_SIZE // 2, min=0, max=GRID_SIZE - 1,
                        update=_on_display_change)
     optimize: BoolProperty(
@@ -809,14 +970,17 @@ class VIEW3D_PT_cube_solveur(bpy.types.Panel):
         box.prop(p, "n_keys")
         box.prop(p, "path_len", slider=True)
         box.prop(p, "verticality", slider=True)
+        box.prop(p, "rho", slider=True)
 
         box = layout.box()
         box.label(text="Affichage", icon='HIDE_OFF')
         box.prop(p, "custom_room")
+        box.prop(p, "room_size")
         box.prop(p, "wall_mode", text="")
         if p.wall_mode == 'CUT':
             box.prop(p, "cut_z", slider=True)
         box.prop(p, "show_path_cubes")
+        box.prop(p, "show_shortcuts")
         if p.wall_mode != 'NONE':
             box.prop(p, "optimize")
             if not p.optimize:
