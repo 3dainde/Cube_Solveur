@@ -375,8 +375,6 @@ GRID_OBJ = "CS_Grille"
 PATH_OBJ = "CS_Chemin"
 BOX_OBJ = "CS_Cadre"
 
-PITCH = 1.0        # distance entre centres de cubes
-
 # Couleur de la spline / des cubes de chemin selon la dernière clé possédée.
 # Niveau 0 (avant toute clé) = vert ; puis une couleur par clé.
 SPLINE_PALETTE = [
@@ -442,10 +440,10 @@ def _get_object(name, data_factory, coll):
     return obj
 
 
-def _world_pos(x, y, z, n):
+def _world_pos(x, y, z, n, pitch):
     """Grille centrée en X/Y, posée sur le sol en Z (fonctionne sur tableaux numpy)."""
-    o = (n - 1) * PITCH / 2.0
-    return x * PITCH - o, y * PITCH - o, z * PITCH + 0.5 * PITCH
+    o = (n - 1) * pitch / 2.0
+    return x * pitch - o, y * pitch - o, z * pitch + 0.5 * pitch
 
 
 def _write_cubes(mesh, centers, sizes, mats):
@@ -561,7 +559,7 @@ def build_grid_mesh(mesh, manifest, result, p):
         return 0
 
     x, y, z = decode_coord(ids, manifest.nx, manifest.ny)
-    wx, wy, wz = _world_pos(x, y, z, n)
+    wx, wy, wz = _world_pos(x, y, z, n, p.room_size)
     centers = np.stack([wx, wy, wz], axis=1).astype(np.float32)
     
     if getattr(p, "custom_room", None):
@@ -572,16 +570,16 @@ def build_grid_mesh(mesh, manifest, result, p):
         mesh.update()
     else:
         # Construction procédurale complète des cubes
-        sizes = np.full(ids.size, 0.96 * PITCH, dtype=np.float32)
+        sizes = np.full(ids.size, 0.96 * p.room_size, dtype=np.float32)
         _write_cubes(mesh, centers, sizes, mats)
         
     return int(ids.size)
 
 
-def build_path_curve(curve, manifest, result, smooth):
+def build_path_curve(curve, manifest, result, smooth, pitch):
     curve.splines.clear()
     curve.dimensions = '3D'
-    curve.bevel_depth = 0.15
+    curve.bevel_depth = 0.15 * pitch
     curve.bevel_resolution = 3
     curve.use_fill_caps = True
     curve.materials.clear()
@@ -596,7 +594,7 @@ def build_path_curve(curve, manifest, result, smooth):
     prev_pt = None
     for s in result.path:
         x, y, z = decode_coord(s.room_id, manifest.nx, manifest.ny)
-        pt = _world_pos(x, y, z, n)
+        pt = _world_pos(x, y, z, n, pitch)
         level = s.inventory.bit_length()
         if not segments or segments[-1][0] != level:
             segments.append((level, [prev_pt] if prev_pt else []))
@@ -615,10 +613,10 @@ def build_path_curve(curve, manifest, result, smooth):
             spline.use_endpoint_u = True
 
 
-def build_box(obj_mesh, n):
-    lo = -n * PITCH / 2.0
-    hi = n * PITCH / 2.0
-    v = [(x, y, z) for z in (0.0, n * PITCH) for y in (lo, hi) for x in (lo, hi)]
+def build_box(obj_mesh, n, pitch):
+    lo = -n * pitch / 2.0
+    hi = n * pitch / 2.0
+    v = [(x, y, z) for z in (0.0, n * pitch) for y in (lo, hi) for x in (lo, hi)]
     e = [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)]
     obj_mesh.clear_geometry()
     obj_mesh.from_pydata(v, e, [])
@@ -646,8 +644,8 @@ def refresh_display(context):
     box.hide_select = True
 
     p.stat_walls = build_grid_mesh(grid.data, manifest, result, p)
-    build_path_curve(path.data, manifest, result, p.smooth)
-    build_box(box.data, manifest.nx)
+    build_path_curve(path.data, manifest, result, p.smooth, p.room_size)
+    build_box(box.data, manifest.nx, p.room_size)
 
     # Gestion de l'instanciation de la salle custom
     # // NOTE POUR UE5/C++ : Dans Unreal, cela correspond à l'utilisation de 
@@ -695,6 +693,8 @@ class CubeSolveurProps(bpy.types.PropertyGroup):
     seed: IntProperty(name="Seed", default=1, min=SEED_MIN, max=SEED_MAX)
     size: IntProperty(name="Taille N (N³)", default=GRID_SIZE, min=8, max=GRID_SIZE,
                       description="Côté de la grille. 64 = 262 144 salles")
+    room_size: FloatProperty(name="Taille (m)", default=1.0, min=0.1, max=1000.0, update=_on_display_change,
+                             description="Taille physique d'une salle et espacement entre les instances")
     n_keys: IntProperty(name="Clés / portes", default=2, min=0, max=3,
                         description="Nombre de plans-barrières à porte verrouillée")
     path_len: FloatProperty(name="Longueur", default=0.45, min=0.0, max=1.0, precision=2,
@@ -820,6 +820,7 @@ class VIEW3D_PT_cube_solveur(bpy.types.Panel):
         box = layout.box()
         box.label(text="Affichage", icon='HIDE_OFF')
         box.prop(p, "custom_room")
+        box.prop(p, "room_size")
         box.prop(p, "wall_mode", text="")
         if p.wall_mode == 'CUT':
             box.prop(p, "cut_z", slider=True)
