@@ -576,7 +576,9 @@ def build_grid_mesh(mesh, manifest, result, p):
     if p.rho > 0.0 and len(rock_ids) > 0:
         rx, ry, rz = decode_coord(rock_ids, n, n)
         lethal_mask = get_lethal_mask(manifest.seed, rx, ry, rz, p.rho)
-        rock_mats[lethal_mask & ~is_wall] = MAT_INDEX["Mortel"]
+        # Visualisation Blender : on colore même la roche solide en rouge
+        # pour que vous puissiez voir la répartition du champ mortel !
+        rock_mats[lethal_mask] = MAT_INDEX["Mortel"]
 
     # --- Cubes de chemin (si "avec cube") : couleur = segment de spline ------
     if p.show_path_cubes and path_ids.size:
