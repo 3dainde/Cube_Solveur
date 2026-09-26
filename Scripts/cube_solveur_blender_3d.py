@@ -390,6 +390,7 @@ PALETTE = [
     ("Mur", (0.05, 0.05, 0.06, 1.0), 0.0),
     ("Sol", (0.16, 0.16, 0.19, 1.0), 0.0),
     ("Mortel", (0.80, 0.10, 0.10, 1.0), 0.2),
+    ("Raccourci", (0.10, 0.80, 0.10, 1.0), 0.2),
 ] + [("Voie%d" % i, rgba, 1.5) for i, (_, rgba, _) in enumerate(SPLINE_PALETTE)]
 MAT_INDEX = {name: i for i, (name, _, _) in enumerate(PALETTE)}
 
@@ -576,9 +577,9 @@ def build_grid_mesh(mesh, manifest, result, p):
     if p.rho > 0.0 and len(rock_ids) > 0:
         rx, ry, rz = decode_coord(rock_ids, n, n)
         lethal_mask = get_lethal_mask(manifest.seed, rx, ry, rz, p.rho)
-        # Visualisation Blender : on colore même la roche solide en rouge
-        # pour que vous puissiez voir la répartition du champ mortel !
+        # Visualisation Blender : on colore même la roche solide
         rock_mats[lethal_mask] = MAT_INDEX["Mortel"]
+        rock_mats[~lethal_mask] = MAT_INDEX["Raccourci"]
 
     # --- Cubes de chemin (si "avec cube") : couleur = segment de spline ------
     if p.show_path_cubes and path_ids.size:
