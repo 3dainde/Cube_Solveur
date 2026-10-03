@@ -124,4 +124,27 @@ public:
         int32 X = Remainder % SizeX;
         return FCubeCoordinate(X, Y, Z);
     }
+
+    /**
+     * Position monde d'une cellule (formule de centrage §5) :
+     *  X/Y centrés sur (N-1)/2, Z posé au sol (+0.5 * RoomSize).
+     */
+    static FVector CellToWorld(const FCubeCoordinate& Coord, int32 N, float RoomSize)
+    {
+        const float Half = (N - 1) * 0.5f;
+        return FVector(
+            (Coord.X - Half) * RoomSize,
+            (Coord.Y - Half) * RoomSize,
+            (Coord.Z + 0.5f) * RoomSize);
+    }
+
+    /** Conversion inverse (monde -> cellule discrète la plus proche). */
+    static FCubeCoordinate WorldToCell(const FVector& World, int32 N, float RoomSize)
+    {
+        const float Half = (N - 1) * 0.5f;
+        return FCubeCoordinate(
+            FMath::RoundToInt(World.X / RoomSize + Half),
+            FMath::RoundToInt(World.Y / RoomSize + Half),
+            FMath::RoundToInt(World.Z / RoomSize - 0.5f));
+    }
 };

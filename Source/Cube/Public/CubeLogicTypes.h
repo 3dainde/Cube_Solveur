@@ -28,6 +28,14 @@ struct CUBE_API FCubeLogicalRoom
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Cube|Room")
     bool bIsDecoy = false;
 
+    // Bit de clé fourni par cette salle (0 = aucune).
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Cube|Room")
+    int32 KeyBit = 0;
+
+    // Bit de clé exigé par la porte de cette salle (0 = aucune).
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Cube|Room")
+    int32 GateBit = 0;
+
     FCubeLogicalRoom() {}
 };
 
@@ -51,6 +59,10 @@ struct CUBE_API FCubeManifest
     // Toutes les salles logiques de ce niveau
     UPROPERTY(BlueprintReadOnly, Category="Cube|Manifest")
     TMap<int32, FCubeLogicalRoom> Rooms;
+
+    // Chemin critique ordonné (Start -> ... -> Exit), en RoomID. Sert au rébus (PathIndex, RLE).
+    UPROPERTY(BlueprintReadOnly, Category="Cube|Manifest")
+    TArray<int32> CriticalPath;
 
     // Indicateurs du Solveur
     UPROPERTY(BlueprintReadOnly, Category="Cube|Manifest")
