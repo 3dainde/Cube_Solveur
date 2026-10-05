@@ -63,18 +63,32 @@ TArray<FCubeRouteToken> UCubeRebusLibrary::RouteToRLE(const TArray<int32>& PathR
     return Tokens;
 }
 
+uint32 UCubeRebusLibrary::GetTrapSeedHash(const FString& Seed)
+{
+    return CubeHash::Combine(CubeHash::Crc32Str(Seed), CubeHash::Crc32Ascii("TRAP"));
+}
+
+int32 UCubeRebusLibrary::GetRhoLimit(double Rho)
+{
+    // Troncature en double, comme int(rho * 10000.0) en Python. En float, 0.35f * 10000 donnerait 3500
+    // au lieu de 3499 et décalerait le champ mortel d'une cellule sur 10 000.
+    return static_cast<int32>(FMath::Max(Rho, 0.0) * 10000.0);
+}
+
+bool UCubeRebusLibrary::IsLethalFast(uint32 TrapSeedHash, int32 X, int32 Y, int32 Z, int32 RhoLimit)
+{
+    // Produits en uint32 (repli modulo 2^32). En int32, 63 * 83492791 déborde : comportement indéfini en C++.
+    const uint32 B = (static_cast<uint32>(X) * 73856093u) ^ (static_cast<uint32>(Y) * 19349663u)
+                   ^ (static_cast<uint32>(Z) * 83492791u);
+    return (CubeHash::Combine(TrapSeedHash, B) % 10000u) < static_cast<uint32>(RhoLimit);
+}
+
 bool UCubeRebusLibrary::IsLethal(const FString& Seed, int32 X, int32 Y, int32 Z,
                                  float Rho, const TSet<int32>& SafeSet, int32 GridSize)
 {
     const int32 RoomID = FCubeMath::EncodeCoord(FCubeCoordinate(X, Y, Z), GridSize, GridSize);
     if (SafeSet.Contains(RoomID)) return false; // Le chemin du solveur reste toujours sain.
-
-    uint32 A = CubeHash::Combine(CubeHash::Crc32Str(Seed), CubeHash::Crc32Str(TEXT("TRAP")));
-    const uint32 B = ((uint32)(X * 73856093)) ^ ((uint32)(Y * 19349663)) ^ ((uint32)(Z * 83492791));
-    const uint32 HFinal = CubeHash::Combine(A, B);
-
-    const uint32 Limit = (uint32)FMath::FloorToInt(Rho * 10000.0f);
-    return (HFinal % 10000u) < Limit;
+    return IsLethalFast(GetTrapSeedHash(Seed), X, Y, Z, GetRhoLimit(static_cast<double>(Rho)));
 }
 
 bool UCubeRebusLibrary::IsLethalCell(const FString& Seed, FCubeCoordinate Cell,
@@ -84,130 +98,126 @@ bool UCubeRebusLibrary::IsLethalCell(const FString& Seed, FCubeCoordinate Cell,
 }
 
 TSet<int32> UCubeRebusLibrary::ComputeSafeShortcuts(const FString& Seed, const TArray<int32>& PathRoomIDs,
-                                                    int32 GridSize, float Rho)
+                                                    int32 GridSize, float Rho, int32 Reach)
 {
-    TSet<int32> ShortcutCells;
-    if (PathRoomIDs.Num() == 0 || Rho <= 0.0f) return ShortcutCells;
-
+    TSet<int32> Out;
     const int32 N = GridSize;
-    const TSet<int32> PathSet(PathRoomIDs);
+    if (PathRoomIDs.Num() == 0 || Rho <= 0.0f || Reach <= 0 || N <= 0) return Out;
 
-    // Premier index d'apparition de chaque salle du chemin (ordre du solveur).
-    TMap<int32, int32> FirstIdx;
+    const int32 N2 = N * N;
+    const int32 N3 = N2 * N;
+    const uint32 TrapHash = GetTrapSeedHash(Seed);
+    const int32 RhoLimit = GetRhoLimit(static_cast<double>(Rho));
+
+    // Première étape où chaque salle du chemin est atteinte (INDEX_NONE hors chemin).
+    TArray<int32> FirstIdx;
+    FirstIdx.Init(INDEX_NONE, N3);
     for (int32 i = 0; i < PathRoomIDs.Num(); ++i)
     {
-        if (!FirstIdx.Contains(PathRoomIDs[i]))
-            FirstIdx.Add(PathRoomIDs[i], i);
+        const int32 ID = PathRoomIDs[i];
+        if (ID >= 0 && ID < N3 && FirstIdx[ID] == INDEX_NONE) FirstIdx[ID] = i;
     }
 
-    // 1. Candidats : cellules non-mortelles, hors chemin.
-    TSet<int32> CandidateSet;
-    for (int32 Z = 0; Z < N; ++Z)
-    for (int32 Y = 0; Y < N; ++Y)
-    for (int32 X = 0; X < N; ++X)
+    auto IsSafe = [&](int32 C)
     {
-        const int32 ID = FCubeMath::EncodeCoord(FCubeCoordinate(X, Y, Z), N, N);
-        if (!PathSet.Contains(ID) && !IsLethal(Seed, X, Y, Z, Rho, PathSet, N))
-        {
-            CandidateSet.Add(ID);
-        }
-    }
-
-    auto GetNeighbors = [N](int32 ID) -> TArray<int32>
-    {
-        const FCubeCoordinate C = FCubeMath::DecodeCoord(ID, N, N);
-        TArray<int32> Res;
-        for (int32 k = 0; k < 6; ++k)
-        {
-            const int32 nx = C.X + GNeighborDelta[k][0];
-            const int32 ny = C.Y + GNeighborDelta[k][1];
-            const int32 nz = C.Z + GNeighborDelta[k][2];
-            if (nx >= 0 && nx < N && ny >= 0 && ny < N && nz >= 0 && nz < N)
-                Res.Add(FCubeMath::EncodeCoord(FCubeCoordinate(nx, ny, nz), N, N));
-        }
-        return Res;
+        const int32 Rest = C % N2;
+        return !IsLethalFast(TrapHash, Rest % N, Rest / N, C / N2, RhoLimit);
     };
 
-    // 2. Exploration par composantes connexes ; on retient les ponts BFS entre points du chemin.
-    TSet<int32> Visited;
-    for (int32 StartID : CandidateSet)
+    // Voisins dans l'ordre -X, +X, -Y, +Y, -Z, +Z (contractuel : fixe les parents du BFS, parité R&D).
+    auto ForEachNeighbor = [N, N2](int32 C, auto&& Fn)
     {
-        if (Visited.Contains(StartID)) continue;
+        const int32 Rest = C % N2;
+        const int32 X = Rest % N;
+        const int32 Y = Rest / N;
+        const int32 Z = C / N2;
+        if (X > 0)     { Fn(C - 1); }
+        if (X < N - 1) { Fn(C + 1); }
+        if (Y > 0)     { Fn(C - N); }
+        if (Y < N - 1) { Fn(C + N); }
+        if (Z > 0)     { Fn(C - N2); }
+        if (Z < N - 1) { Fn(C + N2); }
+    };
 
-        TArray<int32> Component;
-        TQueue<int32> Queue;
-        Visited.Add(StartID);
-        Queue.Enqueue(StartID);
+    TArray<int32> Dist;      // 0 = non atteint
+    TArray<int32> Src;       // étape du chemin dont part le front
+    TArray<int32> Parent;
+    TArray<uint8> Marked;
+    Dist.Init(0, N3);
+    Src.Init(0, N3);
+    Parent.Init(INDEX_NONE, N3);
+    Marked.Init(0, N3);
 
-        TSet<int32> TouchPoints;
-        while (!Queue.IsEmpty())
+    auto Mark = [&](int32 C)
+    {
+        while (C != INDEX_NONE && !Marked[C])
         {
-            int32 Curr; Queue.Dequeue(Curr);
-            Component.Add(Curr);
-            for (int32 Nb : GetNeighbors(Curr))
-            {
-                if (PathSet.Contains(Nb))
-                {
-                    TouchPoints.Add(Nb);
-                }
-                else if (CandidateSet.Contains(Nb) && !Visited.Contains(Nb))
-                {
-                    Visited.Add(Nb);
-                    Queue.Enqueue(Nb);
-                }
-            }
+            Marked[C] = 1;
+            C = Parent[C];
         }
+    };
 
-        if (TouchPoints.Num() >= 2)
+    // Graines : salles sûres voisines du chemin (distance 1), salles du chemin parcourues par RoomID croissant.
+    TArray<int32> Queue;
+    Queue.Reserve(4096);
+    for (int32 P = 0; P < N3; ++P)
+    {
+        const int32 FP = FirstIdx[P];
+        if (FP == INDEX_NONE) continue;
+        ForEachNeighbor(P, [&](int32 C)
         {
-            TArray<int32> SortedTouch = TouchPoints.Array();
-            SortedTouch.Sort([&FirstIdx](int32 A, int32 B) { return FirstIdx[A] < FirstIdx[B]; });
-
-            const TSet<int32> CompSet(Component);
-            for (int32 i = 0; i < SortedTouch.Num(); ++i)
-            for (int32 j = i + 1; j < SortedTouch.Num(); ++j)
+            if (FirstIdx[C] != INDEX_NONE || !IsSafe(C)) return;
+            if (Dist[C] == 0)
             {
-                const int32 U = SortedTouch[i];
-                const int32 V = SortedTouch[j];
-                if (FirstIdx[V] - FirstIdx[U] >= 2)
-                {
-                    // BFS de U vers V au travers de la composante.
-                    TQueue<int32> QPath;
-                    TSet<int32> QVis;
-                    TMap<int32, int32> Parent;
-                    QPath.Enqueue(U);
-                    QVis.Add(U);
-                    bool bFound = false;
-
-                    while (!QPath.IsEmpty() && !bFound)
-                    {
-                        int32 Curr; QPath.Dequeue(Curr);
-                        for (int32 Nb : GetNeighbors(Curr))
-                        {
-                            if (Nb == V) { Parent.Add(Nb, Curr); bFound = true; break; }
-                            if (CompSet.Contains(Nb) && !QVis.Contains(Nb))
-                            {
-                                QVis.Add(Nb);
-                                Parent.Add(Nb, Curr);
-                                QPath.Enqueue(Nb);
-                            }
-                        }
-                    }
-
-                    if (bFound)
-                    {
-                        int32 Trace = Parent[V];
-                        while (Trace != U)
-                        {
-                            ShortcutCells.Add(Trace);
-                            Trace = Parent[Trace];
-                        }
-                    }
-                }
+                Dist[C] = 1;
+                Src[C] = FP;
+                Queue.Add(C);
             }
-        }
+            else
+            {
+                if (FMath::Abs(FP - Src[C]) > 2) Marked[C] = 1;   // une seule salle relie deux étapes éloignées
+                if (FP < Src[C]) Src[C] = FP;
+            }
+        });
     }
-    return ShortcutCells;
+
+    // Fronts : deux fronts d'étapes éloignées qui se touchent (ou un retour sur le chemin) = détour, retenu s'il gagne des pas.
+    for (int32 Head = 0; Head < Queue.Num(); ++Head)
+    {
+        const int32 C = Queue[Head];
+        const int32 Dc = Dist[C];
+        const int32 Sc = Src[C];
+        ForEachNeighbor(C, [&](int32 D)
+        {
+            const int32 F = FirstIdx[D];
+            if (F != INDEX_NONE)
+            {
+                if (Dc + 1 < FMath::Abs(F - Sc)) Mark(C);
+                return;
+            }
+            if (Dist[D] != 0)
+            {
+                if (Dc + Dist[D] + 1 < FMath::Abs(Src[D] - Sc))
+                {
+                    Mark(C);
+                    Mark(D);
+                }
+            }
+            else if (Dc < Reach && IsSafe(D))
+            {
+                Dist[D] = Dc + 1;
+                Src[D] = Sc;
+                Parent[D] = C;
+                Queue.Add(D);
+            }
+        });
+    }
+
+    for (int32 C = 0; C < N3; ++C)
+    {
+        if (Marked[C]) Out.Add(C);
+    }
+    return Out;
 }
 
 FCubeFormula UCubeRebusLibrary::MakeFormula(const FString& Seed, int32 PathIndex,
@@ -246,7 +256,6 @@ TSet<int32> UCubeRebusLibrary::ComputeBridgingCells(const FString& Seed, const T
     if (N <= 0 || PathRoomIDs.Num() < 3) return Bridging;
 
     const int32 Total = N * N * N;
-    const TSet<int32> PathSet(PathRoomIDs);
 
     // Rang de chaque cellule sur le chemin (INDEX_NONE hors chemin).
     TArray<int32> PathIndex;
@@ -260,12 +269,14 @@ TSet<int32> UCubeRebusLibrary::ComputeBridgingCells(const FString& Seed, const T
     // Cellules praticables hors chemin.
     TArray<uint8> Open;
     Open.Init(0, Total);
+    const uint32 TrapHash = GetTrapSeedHash(Seed);
+    const int32 RhoLimit = GetRhoLimit(static_cast<double>(Rho));
     for (int32 Z = 0; Z < N; ++Z)
     for (int32 Y = 0; Y < N; ++Y)
     for (int32 X = 0; X < N; ++X)
     {
         const int32 ID = FCubeMath::EncodeCoord(FCubeCoordinate(X, Y, Z), N, N);
-        if (PathIndex[ID] == INDEX_NONE && !IsLethal(Seed, X, Y, Z, Rho, PathSet, N))
+        if (PathIndex[ID] == INDEX_NONE && !IsLethalFast(TrapHash, X, Y, Z, RhoLimit))
             Open[ID] = 1;
     }
 
@@ -420,8 +431,10 @@ namespace CubeClueDetail
     }
 
     /**
-     * R(Pitch, Yaw, Roll) · d. Conventions UE : Yaw tourne de +X vers +Y, Pitch positif = +Z.
-     * Le Roll ne change jamais la direction (leurre). À Pitch ±90°, le Yaw n'a plus d'effet (gimbal lock, leurre).
+     * R(Pitch, Yaw, Roll) · d. Conventions UE : Yaw tourne de +X vers +Y monde, Pitch positif = +Z.
+     * Grille -> monde inverse Y (FCubeMath::CellToWorld) : North (+Y grille) = -Y monde = Yaw 3pi/2,
+     * South = +Y monde = Yaw pi/2. Le Roll ne change jamais la direction (leurre). À Pitch ±90°, le Yaw
+     * n'a plus d'effet (gimbal lock, leurre).
      */
     static FString MakeEuler(const FCubeRouteToken& Token, FRandomStream& Stream)
     {
@@ -430,9 +443,9 @@ namespace CubeClueDetail
         switch (Token.Dir)
         {
             case ECubeDirection::East:   Yaw = 0; break;
-            case ECubeDirection::North:  Yaw = 1; break;
+            case ECubeDirection::South:  Yaw = 1; break;
             case ECubeDirection::West:   Yaw = 2; break;
-            case ECubeDirection::South:  Yaw = 3; break;
+            case ECubeDirection::North:  Yaw = 3; break;
             case ECubeDirection::Top:    Pitch = 1;  Yaw = Stream.RandRange(0, 3); break;
             case ECubeDirection::Bottom: Pitch = -1; Yaw = Stream.RandRange(0, 3); break;
             default: break;

@@ -29,8 +29,8 @@ public:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Cube|Difficulty", meta=(ClampMin="10", ClampMax="64"))
     int32 GridSizeMax = 32;
 
-    /** Nombre de couples clé/porte le long du chemin. */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Cube|Difficulty", meta=(ClampMin="0"))
+    /** Nombre de couples clé/porte le long du chemin (0 à 3 : l'inventaire tient sur 3 bits). */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Cube|Difficulty", meta=(ClampMin="0", ClampMax="3"))
     int32 NKeys = 2;
 
     /** Calibrage route : 0 = court/direct, 1 = long/sinueux. */
@@ -38,8 +38,12 @@ public:
     float PathLen = 0.45f;
 
     /** Biais vertical (puits en Z) du carving. */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Cube|Difficulty", meta=(ClampMin="0.0", ClampMax="1.0"))
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Cube|Difficulty", meta=(ClampMin="0.02", ClampMax="1.0"))
     float Verticality = 0.18f;
+
+    /** Distance maximale (en salles) entre un raccourci sain et le chemin (PathFinder_Annexes). */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Cube|Difficulty", meta=(ClampMin="1", ClampMax="8"))
+    int32 ShortcutReach = 2;
 
     /** Tier des formules murales (1..). */
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Cube|Difficulty", meta=(ClampMin="1"))

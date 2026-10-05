@@ -4,12 +4,14 @@
 #include "GameFramework/GameModeBase.h"
 #include "CubeRebusTypes.h"
 #include "CubeLogicTypes.h"
+#include "CubePortalLibrary.h"
 #include "GM_CubeGameMode.generated.h"
 
 class UDA_CubeDifficulty;
 class UCubeGenerator;
 class AGS_CubeGameState;
 class ACubeRoom;
+class ACubeLevelActor;
 
 /**
  * GameMode serveur-autoritaire : génère et détient la vérité du niveau
@@ -51,6 +53,33 @@ public:
     /** Rayon de streaming (distance de Tchebychev en cellules). */
     UPROPERTY(EditDefaultsOnly, Category="Cube|Streaming")
     int32 StreamRadius = 3;
+
+    /** Acteur portant les ancrages Socket_Entree / Socket_Sortie (spawné à l'origine, répliqué). */
+    UPROPERTY(EditDefaultsOnly, Category="Cube|Portal")
+    TSubclassOf<ACubeLevelActor> LevelActorClass;
+
+    /** Passerelle d'entrée (optionnelle) : son socket BridgeSocketName est accroché à Socket_Entree. Doit répliquer. */
+    UPROPERTY(EditDefaultsOnly, Category="Cube|Portal")
+    TSubclassOf<AActor> EntryBridgeClass;
+
+    /** Passerelle de sortie (optionnelle), accrochée à Socket_Sortie. */
+    UPROPERTY(EditDefaultsOnly, Category="Cube|Portal")
+    TSubclassOf<AActor> ExitBridgeClass;
+
+    /** Socket de la passerelle qui vient s'accrocher au cube (axe X vers l'extérieur du cube). */
+    UPROPERTY(EditDefaultsOnly, Category="Cube|Portal")
+    FName BridgeSocketName = TEXT("Socket_Cube");
+
+    /** Ancrage d'entrée (bEntry) ou de sortie : centre de la face extérieure du premier / dernier cube. */
+    UFUNCTION(BlueprintPure, Category="Cube|Portal")
+    FCubePortal GetPortal(bool bEntry) const;
+
+    /** Transform monde de l'ancrage (X = vers la passerelle). Identité si le niveau n'est pas prêt. */
+    UFUNCTION(BlueprintPure, Category="Cube|Portal")
+    FTransform GetAnchorWorldTransform(bool bEntry) const;
+
+    UFUNCTION(BlueprintPure, Category="Cube|Portal")
+    ACubeLevelActor* GetLevelActor() const;
 
     /** Notifie l'entrée du joueur dans une cellule (arbitrage mort/victoire). */
     UFUNCTION(BlueprintCallable, Category="Cube|Gameplay")
@@ -95,11 +124,17 @@ protected:
 
     /** Replace tous les pawns joueurs sur la cellule de départ. */
     void PlaceAllPlayersAtStart();
+
+    /** Spawne l'acteur niveau, calcule les ancrages et accroche les passerelles. */
+    void SpawnLevelActorAndBridges();
     FCubeCoordinate GetStartCell() const;
 
     UPROPERTY() FCubeManifest Manifest;
     UPROPERTY() TObjectPtr<UDA_CubeDifficulty> Config;
     UPROPERTY() TObjectPtr<UCubeGenerator> Generator;
+    UPROPERTY() TObjectPtr<ACubeLevelActor> LevelActor;
+    UPROPERTY() TObjectPtr<AActor> EntryBridge;
+    UPROPERTY() TObjectPtr<AActor> ExitBridge;
 
     TArray<int32> PathRoomIDs;
     TMap<int32, int32> PathIndexByRoom;

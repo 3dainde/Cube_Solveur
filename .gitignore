@@ -29,6 +29,13 @@ Saved/
 *.pdb
 *.ipch
 
+# Python (scripts de test/génération)
+__pycache__/
+*.pyc
+
+# LibreOffice / OpenOffice lock files
+.~lock.*#
+
 # OS cruft
 Thumbs.db
 Desktop.ini
