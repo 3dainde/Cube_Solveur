@@ -8,6 +8,7 @@
 #include "PC_CubePlayerController.h"
 #include "CubeRoomStreamer.h"
 #include "CubeRoom.h"
+#include "CubeLevelActor.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "EngineUtils.h"
@@ -17,6 +18,7 @@ AGM_CubeGameMode::AGM_CubeGameMode()
     GameStateClass = AGS_CubeGameState::StaticClass();
     DefaultPawnClass = ACubeCharacter::StaticClass();
     PlayerControllerClass = APC_CubePlayerController::StaticClass();
+    LevelActorClass = ACubeLevelActor::StaticClass();
 }
 
 void AGM_CubeGameMode::BeginPlay()
@@ -66,7 +68,7 @@ int32 AGM_CubeGameMode::PickGridSize(const FString& Seed) const
     const int32 Hi = Config ? Config->GridSizeMax : 32;
     if (Hi <= Lo) return FMath::Clamp(Lo, 10, 64);
 
-    const uint32 H = CubeHash::Combine(CubeHash::Crc32Str(Seed), CubeHash::Crc32Str(TEXT("SIZE")));
+    const uint32 H = CubeHash::Combine(CubeHash::Crc32Str(Seed), CubeHash::Crc32Ascii("SIZE"));
     return Lo + (int32)(H % (uint32)(Hi - Lo + 1));
 }
 
@@ -89,7 +91,8 @@ void AGM_CubeGameMode::BuildLevel()
     const float PathLen     = Config ? Config->PathLen : 0.45f;
     const float Verticality = Config ? Config->Verticality : 0.18f;
     const int32 NKeys       = Config ? Config->NKeys : 2;
-    Manifest = Generator->GenerateCubeAdvanced(Seed, N, PathLen, Verticality, NKeys, 64);
+    // MaxAttempts = 0 : sous-seeds jusqu'au premier niveau jouable (parité R&D, borne de sécurité interne).
+    Manifest = Generator->GenerateCubeAdvanced(Seed, N, PathLen, Verticality, NKeys, 0);
 
     if (!Manifest.bIsValid)
     {
@@ -98,7 +101,7 @@ void AGM_CubeGameMode::BuildLevel()
         return;
     }
 
-    // Indexation du chemin critique.
+    // Indexation du chemin critique (= chemin optimal du solveur).
     PathRoomIDs = Manifest.CriticalPath;
     SafeSet = TSet<int32>(PathRoomIDs);
     PathIndexByRoom.Reset();
@@ -119,7 +122,8 @@ void AGM_CubeGameMode::BuildLevel()
     }
     else if (bEnableShortcuts && Rho > 0.0f)
     {
-        ShortcutSet = UCubeRebusLibrary::ComputeSafeShortcuts(Seed, PathRoomIDs, N, Rho);
+        const int32 Reach = Config ? Config->ShortcutReach : 2;
+        ShortcutSet = UCubeRebusLibrary::ComputeSafeShortcuts(Seed, PathRoomIDs, N, Rho, Reach);
     }
 
     UE_LOG(LogTemp, Log, TEXT("[Cube] Niveau prêt : seed=%s N=%d |chemin|=%d raccourcis=%d interdits=%d Rho=%.2f strict=%d"),
@@ -136,6 +140,9 @@ void AGM_CubeGameMode::BuildLevel()
 
     bLevelReady = true;
 
+    // Ancrages d'entrée / sortie (Socket_Entree / Socket_Sortie) et passerelles.
+    SpawnLevelActorAndBridges();
+
     // Streaming des salles (si une classe de salle est fournie).
     if (RoomClass)
     {
@@ -147,6 +154,76 @@ void AGM_CubeGameMode::BuildLevel()
     }
 
     PlaceAllPlayersAtStart();
+}
+
+void AGM_CubeGameMode::SpawnLevelActorAndBridges()
+{
+    UWorld* World = GetWorld();
+    if (!World || !LevelActorClass) return;
+
+    FActorSpawnParameters Params;
+    Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    Params.Owner = this;
+
+    // Un ACubeLevelActor déjà posé dans la map (aperçu éditeur) est réutilisé, sinon on en spawne un.
+    if (!LevelActor)
+    {
+        for (TActorIterator<ACubeLevelActor> It(World); It; ++It)
+        {
+            LevelActor = *It;
+            break;
+        }
+    }
+    if (!LevelActor)
+    {
+        LevelActor = World->SpawnActor<ACubeLevelActor>(LevelActorClass, FTransform::Identity, Params);
+    }
+    if (!LevelActor) return;
+
+    // La grille est posée à l'origine (FCubeMath::CellToWorld) : l'acteur niveau aussi, sans rotation,
+    // sinon ses ancrages ne tomberaient pas sur les salles du streamer.
+    if (!LevelActor->GetActorTransform().Equals(FTransform::Identity))
+    {
+        UE_LOG(LogCubeSolver, Warning, TEXT("[Cube] %s replacé à l'origine (la grille est centrée sur l'origine)."), *LevelActor->GetName());
+        LevelActor->SetActorTransform(FTransform::Identity);
+    }
+    LevelActor->InitFromManifest(Manifest, RoomSize, Rho, ShortcutSet);
+
+    auto SpawnBridge = [&](TSubclassOf<AActor> BridgeClass, bool bEntry, TObjectPtr<AActor>& Slot)
+    {
+        if (!BridgeClass || !GetPortal(bEntry).bValid) return;
+        if (!Slot)
+        {
+            Slot = World->SpawnActor<AActor>(BridgeClass, LevelActor->GetAnchorWorldTransform(bEntry), Params);
+        }
+        if (Slot && !LevelActor->AttachBridge(Slot, bEntry, BridgeSocketName))
+        {
+            UE_LOG(LogCubeSolver, Warning, TEXT("[Cube] Passerelle %s : socket '%s' introuvable."),
+                   bEntry ? TEXT("d'entrée") : TEXT("de sortie"), *BridgeSocketName.ToString());
+        }
+    };
+    SpawnBridge(EntryBridgeClass, true, EntryBridge);
+    SpawnBridge(ExitBridgeClass, false, ExitBridge);
+
+    const FCubePortal In = GetPortal(true);
+    const FCubePortal Out = GetPortal(false);
+    UE_LOG(LogCubeSolver, Log, TEXT("[Cube] Ancrages : entrée %s face %d, sortie %s face %d."),
+           *In.Location.ToString(), (int32)In.Face, *Out.Location.ToString(), (int32)Out.Face);
+}
+
+FCubePortal AGM_CubeGameMode::GetPortal(bool bEntry) const
+{
+    return bLevelReady ? UCubePortalLibrary::ComputePortal(Manifest, bEntry, RoomSize) : FCubePortal();
+}
+
+ACubeLevelActor* AGM_CubeGameMode::GetLevelActor() const
+{
+    return LevelActor.Get();
+}
+
+FTransform AGM_CubeGameMode::GetAnchorWorldTransform(bool bEntry) const
+{
+    return LevelActor ? LevelActor->GetAnchorWorldTransform(bEntry) : FTransform::Identity;
 }
 
 FCubeCoordinate AGM_CubeGameMode::GetStartCell() const
@@ -246,17 +323,6 @@ void AGM_CubeGameMode::PushRoomHUD(AController* Controller, const FCubeCoordinat
     PC->ClientReceiveRoomClue(Clue, bHasClue, Cell, bShowCoordinates);
 }
 
-static ECubeDirection DeltaToDirection(const FCubeCoordinate& D)
-{
-    if (D.X ==  1 && D.Y == 0 && D.Z == 0) return ECubeDirection::East;
-    if (D.X == -1 && D.Y == 0 && D.Z == 0) return ECubeDirection::West;
-    if (D.X == 0 && D.Y ==  1 && D.Z == 0) return ECubeDirection::North;
-    if (D.X == 0 && D.Y == -1 && D.Z == 0) return ECubeDirection::South;
-    if (D.X == 0 && D.Y == 0 && D.Z ==  1) return ECubeDirection::Top;
-    if (D.X == 0 && D.Y == 0 && D.Z == -1) return ECubeDirection::Bottom;
-    return ECubeDirection::None;
-}
-
 bool AGM_CubeGameMode::GetRoomRebus(FCubeCoordinate Cell, FCubeFormula& OutFormula, ECubeDirection& OutSafeHint) const
 {
     OutFormula = FCubeFormula();
@@ -274,7 +340,7 @@ bool AGM_CubeGameMode::GetRoomRebus(FCubeCoordinate Cell, FCubeFormula& OutFormu
 
     const FCubeCoordinate Next = FCubeMath::DecodeCoord(PathRoomIDs[Index + 1], N, N);
     const FCubeCoordinate D(Next.X - Cell.X, Next.Y - Cell.Y, Next.Z - Cell.Z);
-    OutSafeHint = DeltaToDirection(D);
+    OutSafeHint = FCubeMath::DirectionFromDelta(D);
     if (OutSafeHint == ECubeDirection::None) return false;
 
     const int32 Tier       = Config ? Config->FormulaTier : 1;

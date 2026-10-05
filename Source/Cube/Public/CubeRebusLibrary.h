@@ -27,18 +27,27 @@ public:
     static bool IsLethal(const FString& Seed, int32 X, int32 Y, int32 Z,
                          float Rho, const TSet<int32>& SafeSet, int32 GridSize);
 
+    /** Hash de base du champ mortel d'une seed : Combine(CRC32(seed), CRC32("TRAP")). À calculer une fois. */
+    static uint32 GetTrapSeedHash(const FString& Seed);
+
+    /** Seuil comparé à H mod 10000 : floor(Rho * 10000), calculé en double comme la R&D. */
+    static int32 GetRhoLimit(double Rho);
+
+    /** Variante rapide de IsLethal (sans SafeSet) pour les boucles sur toute la grille. */
+    static bool IsLethalFast(uint32 TrapSeedHash, int32 X, int32 Y, int32 Z, int32 RhoLimit);
+
     UFUNCTION(BlueprintCallable, Category="Cube|Rebus")
     static bool IsLethalCell(const FString& Seed, FCubeCoordinate Cell,
                              float Rho, int32 GridSize, const TSet<int32>& SafeSet);
 
     /**
-     * PathFinder_Annexes : identifie STRICTEMENT les cellules formant un vrai raccourci.
-     * Une cellule non-mortelle n'est un SafeShortcut que si elle appartient à une composante
-     * reliant au moins 2 points distincts et non-adjacents (>= 2 pas) du chemin critique.
+     * PathFinder_Annexes : cellules SafeShortcut = petits détours NON mortels, hors chemin, à au plus
+     * Reach salles du chemin, situés sur le plus court détour qui relie deux étapes i < j du chemin en
+     * GAGNANT des pas (détour de L salles retenu si L + 1 < j - i). Coût linéaire (BFS borné), parité R&D.
      */
     UFUNCTION(BlueprintCallable, Category="Cube|Rebus")
     static TSet<int32> ComputeSafeShortcuts(const FString& Seed, const TArray<int32>& PathRoomIDs,
-                                            int32 GridSize, float Rho);
+                                            int32 GridSize, float Rho, int32 Reach = 2);
 
     /** Calibre la formule modulaire pour que le résultat pointe sur la direction sûre. */
     static FCubeFormula MakeFormula(const FString& Seed, int32 PathIndex,
