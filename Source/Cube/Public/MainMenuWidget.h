@@ -23,6 +23,13 @@ protected:
     UPROPERTY(meta = (BindWidget))
     TObjectPtr<UButton> QuitButton;
 
+    // Optionnels : ajouter dans le WBP des boutons nommés exactement EasyButton / ImpossibleButton.
+    UPROPERTY(meta = (BindWidgetOptional))
+    TObjectPtr<UButton> EasyButton;
+
+    UPROPERTY(meta = (BindWidgetOptional))
+    TObjectPtr<UButton> ImpossibleButton;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Main Menu")
     TSoftObjectPtr<UWorld> PlayLevel;
 
@@ -34,6 +41,16 @@ protected:
 
     UFUNCTION()
     void HandleQuitClicked();
+
+    UFUNCTION()
+    void HandleEasyClicked();
+
+    UFUNCTION()
+    void HandleImpossibleClicked();
+
+    /** Ouvre PlayLevel en passant les options au GameMode (ex. "Difficulty=Impossible"). */
+    UFUNCTION(BlueprintCallable, Category = "Main Menu")
+    void OpenPlayLevel(const FString& Options);
 
     // Laisse le WBP afficher son panneau d'options sans code supplementaire.
     UFUNCTION(BlueprintImplementableEvent, Category = "Main Menu")
