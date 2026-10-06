@@ -21,13 +21,36 @@ void UMainMenuWidget::NativeConstruct()
     {
         QuitButton->OnClicked.AddDynamic(this, &UMainMenuWidget::HandleQuitClicked);
     }
+    if (EasyButton)
+    {
+        EasyButton->OnClicked.AddDynamic(this, &UMainMenuWidget::HandleEasyClicked);
+    }
+    if (ImpossibleButton)
+    {
+        ImpossibleButton->OnClicked.AddDynamic(this, &UMainMenuWidget::HandleImpossibleClicked);
+    }
 }
 
 void UMainMenuWidget::HandlePlayClicked()
 {
+    OpenPlayLevel(FString());
+}
+
+void UMainMenuWidget::HandleEasyClicked()
+{
+    OpenPlayLevel(TEXT("Difficulty=Facile"));
+}
+
+void UMainMenuWidget::HandleImpossibleClicked()
+{
+    OpenPlayLevel(TEXT("Difficulty=Impossible"));
+}
+
+void UMainMenuWidget::OpenPlayLevel(const FString& Options)
+{
     if (!PlayLevel.IsNull())
     {
-        UGameplayStatics::OpenLevelBySoftObjectPtr(this, PlayLevel);
+        UGameplayStatics::OpenLevelBySoftObjectPtr(this, PlayLevel, true, Options);
     }
 }
 
