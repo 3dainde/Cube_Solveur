@@ -3,9 +3,16 @@ Binaries/
 DerivedDataCache/
 Intermediate/
 Saved/
+Plugins/**/Binaries/
+Plugins/**/Intermediate/
+
+# Fichiers projet IDE générés par Unreal (Generate Project Files)
+*.sln
+*.code-workspace
 
 # Visual Studio and local IDE data
 .vs/
+.vscode/
 *.VC.db
 *.VC.opendb
 *.suo
